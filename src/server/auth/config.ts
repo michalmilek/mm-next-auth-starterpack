@@ -3,6 +3,9 @@ import { type DefaultSession, type NextAuthConfig } from "next-auth";
 import DiscordProvider from "next-auth/providers/discord";
 
 import { db } from "@/server/db";
+import Credentials from "next-auth/providers/credentials";
+import { z } from "zod";
+import { compare } from "bcrypt";
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -32,7 +35,35 @@ declare module "next-auth" {
  */
 export const authConfig = {
   providers: [
-    DiscordProvider,
+    Credentials({
+      credentials: {
+        email: { label: "Email", type: "email" },
+        password: { label: "Password", type: "password" },
+      },
+      authorize: async (credentials) => {
+        console.log("Authorizing credentials:", { email: credentials?.email });
+        
+        const parsedCredentials = z.object({ email: z.string().email(), password: z.string().min(8) }).parse(credentials);
+        const user = await db.user.findUnique({
+          where: { email: parsedCredentials.email },
+        });
+        
+        console.log("Found user:", user ? { id: user.id, email: user.email } : null);
+        
+        if (!user?.password) {
+          console.log("No user found or no password");
+          return null;
+        }
+        
+        // Verify the password
+        const isPasswordValid = await compare(parsedCredentials.password, user.password as string);
+        console.log("Password valid:", isPasswordValid);
+        
+        if (!isPasswordValid) return null;
+        
+        return user;
+      },
+    }),
     /**
      * ...add more providers here.
      *
@@ -45,12 +76,63 @@ export const authConfig = {
   ],
   adapter: PrismaAdapter(db),
   callbacks: {
-    session: ({ session, user }) => ({
-      ...session,
-      user: {
-        ...session.user,
-        id: user.id,
-      },
-    }),
+    jwt: async ({ token, user }) => {
+      console.log("JWT callback:", { token, user });
+      if (user) {
+        token.id = user.id;
+      }
+      return token;
+    },
+    session: ({ session, token }) => {
+      console.log("Session callback:", { session, token });
+      return {
+        ...session,
+        user: {
+          ...session.user,
+          id: token.id as string,
+        },
+      };
+    },
   },
+  pages: {
+    signIn: "/auth/login",
+    signOut: "/",
+    error: "/auth/error",
+  },
+  session: {
+    strategy: "jwt",
+    maxAge: 7 * 24 * 60 * 60, // 7 days
+  },
+  jwt: {
+    maxAge: 60 * 60, // 1 hour
+  },
+  cookies: {
+    sessionToken: {
+      name: `michalmilek-sessiontoken`,
+      options: {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: true
+      }
+    },
+    callbackUrl: {
+      name: `michalmilek-callback-url`,
+      options: {
+        sameSite: 'lax',
+        path: '/',
+        secure: true
+      }
+    },
+    csrfToken: {
+      name: `michalmilek-csrf-token`,
+      options: {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: true
+      }
+    }
+  },
+  debug: true, // Enable debug logs
 } satisfies NextAuthConfig;
